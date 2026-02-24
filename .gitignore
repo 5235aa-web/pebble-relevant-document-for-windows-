@@ -1,13 +1,60 @@
-# 数据库文件（包含聊天记录和个人信息）
-data/*.db
-data/*.db-journal
-
-# 配置文件（可能包含 API 密钥）
-voice_config.json
-.env
-
-# 其他可能包含敏感信息的文件
-*.log
-*.pid
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual Environments
+.pebble_env/
+venv/
+.venv/
+env/
+ENV/
+
+# Environment Variables (CRITICAL - contains API keys)
+.env
+.env.local
+.env.*.local
+
+# Database & Data
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+data/
+
+# Logs
+*.log
+logs/
+
+# OS Files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# IDE
+.idea/
+.vscode/
+*.sublime-*
+
+# Models (large files)
+models/
+*.gguf
+*.bin
+*.safetensors
+
+# Audio temp files
+*.wav
+*.mp3
+*.ogg
+!true_voices.json
+
+# PID files
+*.pid
