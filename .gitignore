@@ -58,3 +58,4 @@ models/
 
 # PID files
 *.pid
+config.py
