@@ -50,6 +50,29 @@ class Brain:
         self.emotional_core = emotional_core or EmotionalCore()
         # Load prompts from files at init
         self._soul_prompt = load_soul_prompt()
+        self.vision_client = None
+        self.vision_model = None
+
+    def _get_vision_client(self):
+        """Lazy initialize vision client from vision_config.json"""
+        if self.vision_client is not None:
+            return self.vision_client
+        try:
+            from tools import get_vision_config
+            config = get_vision_config()
+            if not config.get("enabled"):
+                return None
+            api_key = config.get("api_key") or os.getenv("OPENAI_API_KEY", "")
+            self.vision_client = OpenAI(
+                base_url=config.get("base_url"),
+                api_key=api_key,
+                timeout=300.0,
+            )
+            self.vision_model = config.get("model")
+            return self.vision_client
+        except Exception as e:
+            print(f"[Brain] Failed to initialize vision client: {e}")
+            return None
 
     def _get_weather_for_user(self, user_id: str) -> str:
         """Get weather based on user's location."""
@@ -122,6 +145,8 @@ class Brain:
         delivery_mode: str = "text",
         user_length_hint: str = "medium",
         search_results: str = "",
+        image_data_uri: str = None,
+        is_vision: bool = False,
     ) -> List[Dict[str, str]]:
         now = datetime.now()
         time_since_last_interaction = self._format_time_since_last_interaction(history, now)
@@ -145,7 +170,6 @@ class Brain:
             memory_parts.append(f"[Relevant Memories ONLY if directly tied to current message]:\n{retrieved_context}")
         if user_profile:
             memory_parts.append(f"[Pebble's Inner Notes on Us]:\n{user_profile}")
-        # Add web search results if available
         if search_results:
             memory_parts.append(f"[Web Search Results - Use this information to answer the user's question]:\n{search_results}")
         retrieved_memories = "\n\n".join(memory_parts) if memory_parts else "None"
@@ -164,7 +188,6 @@ class Brain:
             delivery_mode=delivery_mode,
             user_length_hint=user_length_hint,
         )
-        # Force the model to prioritize the new persona over old history
         style_enforcer = (
             "\n\n[CRITICAL INSTRUCTION: IGNORE PAST TONE]\n"
             "The user may have just switched your 'Mode'. "
@@ -179,17 +202,54 @@ class Brain:
             f"{style_enforcer}"
         )
 
-        # === DEBUG LOGGING: BRAIN ACTIVITY ===
         print(f"[BROOK BRAIN] Generating response...")
         print(f"[BROOK BRAIN] Weather Context Injected: '{current_weather}'")
         print(f"[BROOK BRAIN] System Prompt Size: {len(system_message)} chars")
-        # =====================================
+
         messages: List[Dict[str, str]] = [{"role": "system", "content": system_message}]
-        for item in history:
-            role = item.get("role")
-            content = item.get("content")
-            if role and content is not None:
-                messages.append({"role": str(role), "content": str(content)})
+
+        # Add history messages
+        if history:
+            # Add all but last message as plain text
+            for item in history[:-1]:
+                role = item.get("role")
+                content = item.get("content")
+                if role and content is not None:
+                    messages.append({"role": str(role), "content": str(content)})
+
+            # Handle last message (current user input)
+            last_item = history[-1]
+            if last_item.get("role") == "user" and is_vision and image_data_uri:
+                content_parts = []
+                # Add image first (阿里千问格式)
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_data_uri
+                        }
+                })
+                # Add text if present
+                text_content = last_item.get("content", "")
+                if text_content.strip():
+                    content_parts.append({
+                        "type": "text",
+                        "text": text_content
+                    })
+                messages.append({"role": "user", "content": content_parts})
+            else:
+                messages.append({"role": last_item["role"], "content": last_item.get("content", "")})
+        else:
+            # No history, but there is an image (rare case)
+            if is_vision and image_data_uri:
+                content_parts = [{
+                    "type": "image_url",
+                    "image_url": {
+                         "url": image_data_uri
+                    }
+                }]
+                messages.append({"role": "user", "content": content_parts})
+
+        # Add delivery mode instructions
         if str(delivery_mode).strip().lower() == "voice":
             messages.append(
                 {
@@ -273,20 +333,26 @@ class Brain:
         delivery_mode: str = "text",
         user_length_hint: str = "medium",
         web_search_enabled: bool = True,
+        image_data_uri: str = None
     ) -> Tuple[str, str]:
-        # === WEB SEARCH INTEGRATION ===
+        # === Determine if vision should be used ===
+        use_vision = False
+        vision_client = None
+        if image_data_uri:
+            vision_client = self._get_vision_client()
+            if vision_client:
+                use_vision = True
+
+        # === Web search integration ===
         search_results = ""
         if web_search_enabled:
-            # Get the latest user message
             latest_user_text = ""
             for item in reversed(history):
                 if str(item.get("role", "")).lower() == "user":
                     latest_user_text = str(item.get("content", "")).strip()
                     break
-
             if latest_user_text:
                 from tools import extract_search_query, web_search
-                # When toggle is ON, always search (no keyword check needed)
                 search_query = extract_search_query(latest_user_text)
                 print(f"[Brain] Web Search (Auto Mode) triggered for: {search_query}")
                 search_results = web_search(search_query, max_results=5)
@@ -294,8 +360,8 @@ class Brain:
                     print(f"[Brain] Search results found: {len(search_results)} chars")
                 else:
                     print(f"[Brain] No search results found")
-        # ================================
 
+        # === Memory context ===
         memory_context = retrieved_context
         if user_id and not memory_context:
             latest_user_text = ""
@@ -308,8 +374,9 @@ class Brain:
                     query=latest_user_text,
                     user_id=user_id,
                 )
-                # 调试：打印检索到的记忆
                 print(f"[Memory Debug] Retrieved context for user '{user_id}': {memory_context[:200] if memory_context else 'EMPTY'}")
+
+        # === Build messages ===
         messages = self._build_messages(
             history=history,
             persona=persona,
@@ -322,13 +389,25 @@ class Brain:
             delivery_mode=delivery_mode,
             user_length_hint=user_length_hint,
             search_results=search_results,
+            image_data_uri=image_data_uri,
+            is_vision=use_vision,
         )
+
+        # === API call with retries ===
         raw_output = ""
+        completion = None
         retries = 0
         while retries < 2:
             try:
-                completion = self.client.chat.completions.create(
-                    model=self.model,
+                if use_vision:
+                    current_client = vision_client
+                    current_model = self.vision_model
+                else:
+                    current_client = self.client
+                    current_model = self.model
+
+                completion = current_client.chat.completions.create(
+                    model=current_model,
                     messages=messages,
                     temperature=0.85,
                     presence_penalty=0.3,
@@ -351,6 +430,14 @@ class Brain:
             except Exception as e:
                 retries += 1
                 print(f"[Brain Error] Completion failed on attempt {retries}: {e}")
+                if retries >= 2:
+                    raw_output = "I'm having trouble processing that right now."
+                    break
+
+        if not raw_output.strip():
+            raw_output = "I'm having trouble processing that right now."
+
+        # === Post-process output ===
         thinks = [match.strip() for match in THINK_TAG_PATTERN.findall(raw_output)]
         clean_output = self._clean_model_output(raw_output)
         if thinks:
@@ -434,7 +521,6 @@ class Brain:
         if not chat_logs:
             return ""
         logs_blob = "\n".join(f"[{item.get('created_at', '')}] {item.get('role', 'unknown')}: {item.get('content', '')}" for item in chat_logs)
-        # Use dream prompt from file
         dream_prompt = load_dream_prompt()
         messages = [{"role": "system", "content": dream_prompt}, {"role": "user", "content": logs_blob}]
         raw = self._chat(messages=messages, temperature=0.4).strip()
@@ -528,7 +614,6 @@ class Brain:
         return random.random() < probability
 
     def generate_loop_followup(self, topic: str, expected_time: str = "soon") -> str:
-        # Use loop followup prompt from file
         prompt_template = load_loop_followup_prompt()
         prompt = prompt_template.format(topic=topic, expected_time=expected_time)
         messages = [{"role": "system", "content": prompt}]
@@ -536,7 +621,6 @@ class Brain:
         return self._clean_model_output(raw)
 
     def generate_spontaneous_thought(self, gap: str, mood: str, weather: str) -> str:
-        # Use spontaneous prompt from file
         prompt_template = load_spontaneous_prompt()
         prompt = prompt_template.format(gap=gap, mood=mood, weather=weather)
         messages = [{"role": "system", "content": prompt}]
@@ -544,7 +628,6 @@ class Brain:
         return self._clean_model_output(raw)
 
     def generate_reminiscence_thought(self, random_memory_summary: str) -> str:
-        # Use reminiscence prompt from file
         prompt_template = load_reminiscence_prompt()
         prompt = prompt_template.format(memory_summary=random_memory_summary)
         messages = [{"role": "system", "content": prompt}]
@@ -570,11 +653,8 @@ class Brain:
             return {"summary": previous_summary, "emotional_notes": previous_emotional_notes, "day_summary": "Unable to parse dream summary JSON."}
 
     def extract_facts_from_summary(self, summary_text: str) -> List[str]:
-        """Extract concrete user facts (name, age, location, hobbies, preferences, etc.) from conversation."""
         if not summary_text.strip():
             return []
-
-        # 改进的提示词，更明确地要求提取用户信息
         messages = [
             {
                 "role": "system",
@@ -589,20 +669,17 @@ class Brain:
             },
             {"role": "user", "content": summary_text}
         ]
-
         raw = self._chat(messages=messages, temperature=0.2).strip()
         try:
             data = json.loads(raw)
             facts = data.get("facts", [])
             if isinstance(facts, list):
-                # 过滤掉空的事实
                 return [str(item).strip() for item in facts if str(item).strip() and len(str(item).strip()) > 2]
         except json.JSONDecodeError:
             return []
         return []
 
     def extract_names_from_text(self, text: str) -> Optional[Dict[str, str]]:
-        """Extract user's name and what they want to call the bot from their message."""
         messages = [
             {"role": "system", "content": (
                 "Extract names from the user's message. "

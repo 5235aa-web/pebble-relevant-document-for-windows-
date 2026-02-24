@@ -3,6 +3,8 @@ import os
 import signal
 import subprocess
 import time
+# 在现有 imports 中添加
+from tools import get_vision_config, set_vision_config
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -257,8 +259,12 @@ def _get_telegram_bot_info() -> Dict[str, Dict[str, str]]:
     if not TELEGRAM_BOT_TOKEN:
         return {"Pebble": {"user_id": "brook_local", "description": "Local fallback (no token)"}}
     try:
+        import asyncio
         import telegram
         bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        bot_info = loop.run_until_complete(bot.get_me())
         bot_info = bot.get_me()
         username = bot_info.username or "Pebble"
         name = bot_info.name or username
@@ -529,10 +535,10 @@ def _pairs_to_history(pairs: List[List[str]]) -> List[Dict[str, str]]:
     return messages
 
 
-def _reply(profile_name: str, user_text: str, history: List[Dict[str, str]], voice_on: str, web_search_enabled: bool = False, conversation_id: int = None):
+def _reply(profile_name: str, user_text: str, history: List[Dict[str, str]], voice_on: str, web_search_enabled: bool = False, conversation_id: int = None, image_data_uri: str = None):
     text = str(user_text or "").strip()
-    if not text:
-        return history, "Type a message first.", None
+    if not text and not image_data_uri:
+        return history, "Type a message or upload an image first.", None
 
     user_id = _profile_user_id(profile_name)
     print(f"[Memory Debug] Using user_id: '{user_id}' for profile: '{profile_name}'")
@@ -553,6 +559,7 @@ def _reply(profile_name: str, user_text: str, history: List[Dict[str, str]], voi
         delivery_mode="voice" if voice_on == "On" else "text",
         user_length_hint="medium",
         web_search_enabled=web_search_enabled,  # Web search toggle
+        image_data_uri=image_data_uri,
     )
     reply_text = (reply_text or "").strip() or "Say that again?"
 
@@ -693,11 +700,28 @@ def rename_conversation(profile_name: str, conversation_id: int, new_title: str)
 
 # ==================== Chat Functions ====================
 
-def send_text(profile_name: str, user_text: str, history: List[Dict[str, str]], voice_on: str, web_search_on: str = "Off", conversation_id: int = None):
+def send_text(profile_name: str, user_text: str, history: List[Dict[str, str]], voice_on: str, web_search_on: str = "Off", conversation_id: int = None, image_path: str = None):
     web_search_enabled = True if web_search_on == "On" else False
-    out_history, status, audio = _reply(profile_name, user_text, history, voice_on, web_search_enabled, conversation_id)
+    image_data_uri = None
+    if image_path and os.path.exists(image_path):
+        import base64
+        with open(image_path, "rb") as f:
+            img_bytes = f.read()
+        ext = os.path.splitext(image_path)[1].lower()
+        if ext in [".jpg", ".jpeg"]:
+            mime = "image/jpeg"
+        elif ext == ".png":
+            mime = "image/png"
+        elif ext == ".webp":
+            mime = "image/webp"
+        elif ext == ".gif":
+            mime = "image/gif"
+        else:
+            mime = "image/jpeg"
+        base64_str = base64.b64encode(img_bytes).decode("utf-8")
+        image_data_uri = f"data:{mime};base64,{base64_str}"
+    out_history, status, audio = _reply(profile_name, user_text, history, voice_on, web_search_enabled, conversation_id, image_data_uri)
     return out_history, status, "", audio, out_history, conversation_id  # Returns 6 values
-
 
 def send_uploaded_audio(profile_name: str, audio_path: str, history: List[Dict[str, str]], voice_on: str, conversation_id: int = None):
     if not audio_path:
@@ -705,7 +729,7 @@ def send_uploaded_audio(profile_name: str, audio_path: str, history: List[Dict[s
     transcript = transcribe_audio_file(audio_path)
     if not transcript:
         return history, "Could not transcribe audio.", None, history, history, conversation_id
-    out_history, status, audio = _reply(profile_name, transcript, history, "On", False, conversation_id)
+    out_history, status, audio = _reply(profile_name, transcript, history, "On", False, conversation_id, None)
     return out_history, f"{status} Transcript: {transcript}", audio, out_history, out_history, conversation_id  # Returns 6 values
 
 
@@ -916,6 +940,8 @@ with gr.Blocks(title="Home Control Center") as demo:
             status = gr.Textbox(label="Status", interactive=False)
             with gr.Row():
                 chat_in = gr.Textbox(label="Type message", lines=2)
+                image_input = gr.Image(type="filepath", label="Upload Image (optional)")
+            with gr.Row():
                 send_btn = gr.Button("Send")
                 clear_btn = gr.Button("Clear")
             voice_out = gr.Audio(label="Voice Reply File", type="filepath", autoplay=True)
@@ -1076,7 +1102,7 @@ with gr.Blocks(title="Home Control Center") as demo:
                 inputs=[persona_editor],
                 outputs=[persona_save_status],
             )
-
+            
             # --- TTS Provider Selection ---
             gr.Markdown("---\n#### TTS Provider Selection")
             gr.Markdown("Choose between local (IndexTTS2) or cloud (ElevenLabs) TTS.")
@@ -1110,6 +1136,56 @@ with gr.Blocks(title="Home Control Center") as demo:
                     type="password",
                     placeholder="Enter your ElevenLabs API key..."
                 )
+            gr.Markdown("---\n#### 👁️ 视觉模型配置 (图片理解)")
+            gr.Markdown("独立配置用于图片理解的模型，不影响文字聊天。启用后，发送图片时将使用此配置。")
+            vision_enabled = gr.Checkbox(
+                label="启用视觉模型",
+                value=get_vision_config().get("enabled", False),
+            )
+            with gr.Row():
+                vision_provider = gr.Dropdown(
+                    label="Provider",
+                    choices=list(PROVIDER_PRESETS.keys()),
+                    value=get_vision_config().get("provider", "阿里千问"),
+                )
+                vision_api_key = gr.Textbox(
+                    label="API Key",
+                    value=get_vision_config().get("api_key", ""),
+                    type="password",
+                    placeholder="Enter vision model API key...",
+                )
+            with gr.Row():
+                vision_base_url = gr.Textbox(
+                    label="Base URL",
+                    value=get_vision_config().get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                    placeholder="https://api.example.com/v1",
+                )
+                vision_model = gr.Textbox(
+                    label="Model Name",
+                    value=get_vision_config().get("model", "qwen-vl-plus"),
+                    placeholder="qwen-vl-plus, etc.",
+                )
+            vision_status = gr.Textbox(label="Status", interactive=False)
+            save_vision_btn = gr.Button("Save Vision Settings", variant="primary")
+            def on_vision_provider_change(provider):
+                preset = PROVIDER_PRESETS.get(provider, {})
+                base_url = preset.get("base_url", "")
+                model = preset.get("model", "")
+                return base_url, model
+            vision_provider.change(
+                on_vision_provider_change,
+                inputs=[vision_provider],
+                outputs=[vision_base_url, vision_model],
+            )
+            def save_vision_settings(enabled, provider, api_key, base_url, model):
+                set_vision_config(enabled, provider, api_key, base_url, model)
+                return f"✅ Vision settings saved! Provider: {provider}"
+            save_vision_btn.click(
+                save_vision_settings,
+                inputs=[vision_enabled, vision_provider, vision_api_key, vision_base_url, vision_model],
+                outputs=[vision_status],
+            )
+
 
             # --- Local TTS Settings (IndexTTS2) ---
             gr.Markdown("---\n#### Local TTS Settings (IndexTTS2)")
@@ -1337,7 +1413,7 @@ with gr.Blocks(title="Home Control Center") as demo:
 
     send_btn.click(
         send_text,
-        inputs=[profile, chat_in, state, voice_toggle, web_search_toggle, conversation_id],
+        inputs=[profile, chat_in, state, voice_toggle, web_search_toggle, conversation_id,image_input],
         outputs=[chat, status, chat_in, voice_out, state, conversation_id],
     )
 

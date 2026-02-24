@@ -359,3 +359,80 @@ def extract_search_query(query: str) -> str:
         query = query.split('?')[0].strip() + "?"
 
     return query
+# tools.py 末尾添加
+
+VISION_CONFIG_PATH = Path(__file__).resolve().parent / "vision_config.json"
+
+def get_vision_config() -> dict:
+    """Get vision model settings from vision_config.json"""
+    default_config = {
+        "enabled": False,
+        "provider": "阿里千问",
+        "api_key": "",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-vl-plus",
+    }
+    try:
+        if VISION_CONFIG_PATH.exists():
+            config = json.loads(VISION_CONFIG_PATH.read_text())
+            return {**default_config, **config}
+    except Exception:
+        pass
+    return default_config
+
+def set_vision_config(
+    enabled: bool = None,
+    provider: str = None,
+    api_key: str = None,
+    base_url: str = None,
+    model: str = None,
+) -> None:
+    """Update vision settings in vision_config.json"""
+    config = get_vision_config()
+    if enabled is not None:
+        config["enabled"] = enabled
+    if provider is not None:
+        config["provider"] = provider
+    if api_key is not None:
+        config["api_key"] = api_key
+    if base_url is not None:
+        config["base_url"] = base_url
+    if model is not None:
+        config["model"] = model
+VISION_CONFIG_PATH = Path(__file__).resolve().parent / "vision_config.json"
+def get_vision_config() -> dict:
+    """Get vision model settings from vision_config.json"""
+    default_config = {
+        "enabled": False,
+        "provider": "aliyun",
+        "api_key": "",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "qwen-vl-plus",
+    }
+    try:
+        if VISION_CONFIG_PATH.exists():
+            config = json.loads(VISION_CONFIG_PATH.read_text())
+            return {**default_config, **config}
+    except Exception:
+        pass
+    return default_config
+def set_vision_config(
+    enabled: bool = None,
+    provider: str = None,
+    api_key: str = None,
+    base_url: str = None,
+    model: str = None,
+) -> None:
+    """Update vision settings in vision_config.json"""
+    config = get_vision_config()
+    if enabled is not None:
+        config["enabled"] = enabled
+    if provider is not None:
+        config["provider"] = provider
+    if api_key is not None:
+        config["api_key"] = api_key
+    if base_url is not None:
+        config["base_url"] = base_url
+    if model is not None:
+        config["model"] = model
+    VISION_CONFIG_PATH.write_text(json.dumps(config, indent=2))
