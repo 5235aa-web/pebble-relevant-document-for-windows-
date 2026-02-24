@@ -348,12 +348,12 @@ class Brain:
         if web_search_enabled:
             latest_user_text = ""
             for item in reversed(history):
-                if str(item.get("role", "")).lower() == "user":
-                    latest_user_text = str(item.get("content", "")).strip()
+                if item.get("role") == "user":
+                    latest_user_text = item.get("content", "").strip()
                     break
-            if latest_user_text:
+            if latest_user_text and needs_web_search(latest_user_text):
                 from tools import extract_search_query, web_search
-                search_query = extract_search_query(latest_user_text)
+                search_results = web_search(search_query, max_results=5)
                 print(f"[Brain] Web Search (Auto Mode) triggered for: {search_query}")
                 search_results = web_search(search_query, max_results=5)
                 if search_results:
