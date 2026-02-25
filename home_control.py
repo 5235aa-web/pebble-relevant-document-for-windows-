@@ -1,3 +1,5 @@
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 import json
 import os
 import signal
@@ -182,23 +184,64 @@ def _save_tts_settings(
     quality_preset: str,
     elevenlabs_api_key: str,
     elevenlabs_voice_name: str
-) -> str:
-    """Save TTS settings to voice_config.json."""
-    # Convert voice_name to voice_id
-    elevenlabs_voice_id = ELEVENLABS_VOICES.get(elevenlabs_voice_name, "JBFqnCBsd6RMkjVDRZzb")
+) -> Tuple[str, gr.update, gr.update, gr.update, gr.update, gr.update, gr.update, gr.update]:
+    current_config = get_voice_config()
+    current_config["tts_provider"] = tts_provider
 
-    set_voice_config(
-        tts_provider=tts_provider,
-        reference_audio=reference_audio if reference_audio else None,
-        emotion=emotion,
-        speed=speed,
-        quality_preset=quality_preset,
-        elevenlabs_api_key=elevenlabs_api_key if elevenlabs_api_key else None,
-        elevenlabs_voice_id=elevenlabs_voice_id
-    )
+    # Get current settings for all fields (to preserve values of hidden components)
+    updated_settings = _get_tts_settings()
+    current_ref_audio = updated_settings[1]
+    current_emotion = updated_settings[2]
+    current_speed = updated_settings[3]
+    current_quality = updated_settings[4]
+    current_elevenlabs_api_key = updated_settings[5]
+    current_elevenlabs_voice = updated_settings[6]
 
-    status = f"✅ Saved! Provider: {tts_provider}, Voice: {elevenlabs_voice_name}, Speed: {speed}"
-    return status
+    if tts_provider == "local":
+        # Save local TTS settings
+        current_config["reference_audio"] = reference_audio if reference_audio else None
+        current_config["emotion"] = emotion
+        current_config["speed"] = speed
+        current_config["quality_preset"] = quality_preset
+        # Keep ElevenLabs settings as-is
+        status = f"✅ Saved! Local TTS: Audio={reference_audio}, Emotion={emotion}, Speed={speed}x, Quality={quality_preset}"
+    else:
+        # Save ElevenLabs settings
+        elevenlabs_voice_id = ELEVENLABS_VOICES.get(elevenlabs_voice_name, "JBFqnCBsd6RMkjVDRZzb")
+        current_config["elevenlabs_api_key"] = elevenlabs_api_key if elevenlabs_api_key else None
+        current_config["elevenlabs_voice_id"] = elevenlabs_voice_id
+        # Keep local TTS settings as-is
+        status = f"✅ Saved! ElevenLabs: Voice={elevenlabs_voice_name}"
+
+    # Save to file
+    import json
+    from tools import VOICE_CONFIG_PATH
+    VOICE_CONFIG_PATH.write_text(json.dumps(current_config, indent=2))
+
+    print(f"[DEBUG] Saved TTS settings: {status}")
+
+    # Create updates for all components
+    # Note: Hidden components will receive their current values to preserve state
+    provider_upd = gr.update(value=tts_provider)
+
+    if tts_provider == "local":
+        # Local mode: update local components, preserve ElevenLabs components
+        ref_upd = gr.update(value=reference_audio if reference_audio else current_ref_audio)
+        emotion_upd = gr.update(value=emotion)
+        speed_upd = gr.update(value=speed)
+        quality_upd = gr.update(value=quality_preset)
+        api_key_upd = gr.update(value=current_elevenlabs_api_key)
+        voice_name_upd = gr.update(value=current_elevenlabs_voice)
+    else:
+        # ElevenLabs mode: update ElevenLabs components, preserve local components
+        ref_upd = gr.update(value=current_ref_audio)
+        emotion_upd = gr.update(value=current_emotion)
+        speed_upd = gr.update(value=current_speed)
+        quality_upd = gr.update(value=current_quality)
+        api_key_upd = gr.update(value=elevenlabs_api_key if elevenlabs_api_key else current_elevenlabs_api_key)
+        voice_name_upd = gr.update(value=elevenlabs_voice_name)
+
+    return status, provider_upd, ref_upd, emotion_upd, speed_upd, quality_upd, api_key_upd, voice_name_upd
 
 
 def preview_voice(
@@ -1113,29 +1156,91 @@ with gr.Blocks(title="Home Control Center") as demo:
              current_quality, current_api_key, current_voice_name) = current_settings
 
             with gr.Row():
-                with gr.Column():
-                    tts_provider_dropdown = gr.Dropdown(
-                        label="TTS Provider",
-                        choices=TTS_PROVIDER_OPTIONS,
-                        value=current_provider,
-                    )
-                    gr.Markdown("local = IndexTTS2 (free, GPU required) | elevenlabs = Cloud API (fast, quality)")
+                tts_provider_dropdown = gr.Dropdown(
+                    label="TTS Provider",
+                    choices=TTS_PROVIDER_OPTIONS,
+                    value=current_provider,
+                )
+                gr.Markdown("local = IndexTTS2 (free, GPU required) | elevenlabs = Cloud API (fast, quality)")
 
-                with gr.Column():
+            # Local TTS Settings (IndexTTS2)
+            with gr.Column(visible=(current_provider == "local")) as local_tts_col:
+                gr.Markdown("#### Local TTS Settings (IndexTTS2)")
+                gr.Markdown("Configure local voice synthesis (requires GPU).")
+
+                # Get available reference audio files
+                ref_audio_choices = get_reference_audio_list()
+                if not ref_audio_choices:
+                    ref_audio_choices = ["No reference audio found"]
+
+                with gr.Row():
+                    reference_audio_dropdown = gr.Dropdown(
+                        label="Reference Audio (Voice Timbre)",
+                        choices=ref_audio_choices,
+                        value=current_ref_audio if current_ref_audio in ref_audio_choices else ref_audio_choices[0],
+                    )
+                with gr.Row():
+                    emotion_dropdown = gr.Dropdown(
+                        label="Emotion",
+                        choices=EMOTION_OPTIONS,
+                        value=current_emotion,
+                    )
+                with gr.Row():
+                    speed_slider = gr.Slider(
+                        minimum=0.5,
+                        maximum=2.0,
+                        value=current_speed,
+                        step=0.1,
+                        label="Speed (0.5x - 2.0x)"
+                    )
+
+                with gr.Row():
+                    quality_dropdown = gr.Dropdown(
+                        label="Quality Preset",
+                        choices=QUALITY_PRESET_OPTIONS,
+                        value=current_quality,
+                    )
+
+            # ElevenLabs Cloud TTS
+            with gr.Column(visible=(current_provider == "elevenlabs")) as elevenlabs_col:
+                gr.Markdown("#### ElevenLabs Cloud TTS")
+                with gr.Row():
                     elevenlabs_voice_dropdown = gr.Dropdown(
                         label="ElevenLabs Voice",
                         choices=ELEVENLABS_VOICE_OPTIONS,
                         value=current_voice_name,
                     )
-                    gr.Markdown("Select voice for ElevenLabs")
+                with gr.Row():
+                    elevenlabs_api_key_input = gr.Textbox(
+                        label="ElevenLabs API Key",
+                        value=current_api_key,
+                        type="password",
+                        placeholder="Enter your ElevenLabs API key..."
+                    )
 
-            with gr.Row():
-                elevenlabs_api_key_input = gr.Textbox(
-                    label="ElevenLabs API Key",
-                    value=current_api_key,
-                    type="password",
-                    placeholder="Enter your ElevenLabs API key..."
-                )
+            tts_status = gr.Textbox(label="Status", interactive=False)
+            save_tts_btn = gr.Button("Save TTS Settings", variant="primary")
+            save_tts_btn.click(
+                _save_tts_settings,
+                inputs=[tts_provider_dropdown, reference_audio_dropdown, emotion_dropdown,speed_slider, quality_dropdown, elevenlabs_api_key_input,elevenlabs_voice_dropdown],
+                outputs=[tts_status, tts_provider_dropdown, reference_audio_dropdown,
+                         emotion_dropdown, speed_slider, quality_dropdown,
+                         elevenlabs_api_key_input, elevenlabs_voice_dropdown],
+            )
+
+            # TTS UI toggle function
+            def update_tts_ui(provider):
+                return {
+                    local_tts_col: gr.update(visible=(provider == "local")),
+                    elevenlabs_col: gr.update(visible=(provider == "elevenlabs")),
+                }
+            tts_provider_dropdown.change(
+                update_tts_ui,
+                inputs=[tts_provider_dropdown],
+                outputs=[local_tts_col, elevenlabs_col],
+            )
+
+            # --- Vision Model Configuration ---
             gr.Markdown("---\n#### 👁️ 视觉模型配置 (图片理解)")
             gr.Markdown("独立配置用于图片理解的模型，不影响文字聊天。启用后，发送图片时将使用此配置。")
             vision_enabled = gr.Checkbox(
@@ -1167,78 +1272,27 @@ with gr.Blocks(title="Home Control Center") as demo:
                 )
             vision_status = gr.Textbox(label="Status", interactive=False)
             save_vision_btn = gr.Button("Save Vision Settings", variant="primary")
+
             def on_vision_provider_change(provider):
                 preset = PROVIDER_PRESETS.get(provider, {})
                 base_url = preset.get("base_url", "")
                 model = preset.get("model", "")
                 return base_url, model
+
             vision_provider.change(
                 on_vision_provider_change,
                 inputs=[vision_provider],
                 outputs=[vision_base_url, vision_model],
             )
+
             def save_vision_settings(enabled, provider, api_key, base_url, model):
                 set_vision_config(enabled, provider, api_key, base_url, model)
                 return f"✅ Vision settings saved! Provider: {provider}"
+
             save_vision_btn.click(
                 save_vision_settings,
                 inputs=[vision_enabled, vision_provider, vision_api_key, vision_base_url, vision_model],
                 outputs=[vision_status],
-            )
-
-
-            # --- Local TTS Settings (IndexTTS2) ---
-            gr.Markdown("---\n#### Local TTS Settings (IndexTTS2)")
-            gr.Markdown("Configure local voice synthesis (requires GPU).")
-
-            # Get available reference audio files
-            ref_audio_choices = get_reference_audio_list()
-            if not ref_audio_choices:
-                ref_audio_choices = ["No reference audio found"]
-
-            with gr.Row():
-                with gr.Column():
-                    reference_audio_dropdown = gr.Dropdown(
-                        label="Reference Audio (Voice Timbre)",
-                        choices=ref_audio_choices,
-                        value=current_ref_audio if current_ref_audio in ref_audio_choices else ref_audio_choices[0],
-                    )
-                    gr.Markdown("Select audio file to clone voice timbre")
-
-                with gr.Column():
-                    emotion_dropdown = gr.Dropdown(
-                        label="Emotion",
-                        choices=EMOTION_OPTIONS,
-                        value=current_emotion,
-                    )
-                    gr.Markdown("Options: neutral, happy, sad, angry, excited, calm")
-
-            with gr.Row():
-                with gr.Column():
-                    speed_slider = gr.Slider(
-                        minimum=0.5,
-                        maximum=2.0,
-                        value=current_speed,
-                        step=0.1,
-                        label="Speed (0.5x - 2.0x)"
-                    )
-
-                with gr.Column():
-                    quality_dropdown = gr.Dropdown(
-                        label="Quality Preset",
-                        choices=QUALITY_PRESET_OPTIONS,
-                        value=current_quality,
-                    )
-                    gr.Markdown("fast=fastest, balanced=default, quality=best")
-
-            tts_status = gr.Textbox(label="Status", interactive=False)
-            save_tts_btn = gr.Button("Save TTS Settings", variant="primary")
-            save_tts_btn.click(
-                _save_tts_settings,
-                inputs=[tts_provider_dropdown, reference_audio_dropdown, emotion_dropdown,
-                        speed_slider, quality_dropdown, elevenlabs_api_key_input,
-                        elevenlabs_voice_dropdown],
-                outputs=[tts_status],
             )
 
             # --- Voice Preview Section ---
@@ -1322,7 +1376,7 @@ with gr.Blocks(title="Home Control Center") as demo:
                     return [], None, "Select a conversation to load", []
             selected_conv_id = selected_conv_id[0]
             try:
-               conv_id = int(selected_conv_id.split(" - ")[0])
+                conv_id = int(selected_conv_id.split(" - ")[0])
             except (ValueError, IndexError, AttributeError):
                 return [], None, "Invalid conversation selection", []
             history, _, title = load_conversation(profile_name, conv_id)
